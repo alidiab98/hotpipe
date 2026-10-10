@@ -1,7 +1,7 @@
 # HotPipe
 
-Постоянные SSH-туннели в WSL: поднимаются сами при входе в Windows, поднимаются
-заново после обрыва, управляются из окна.
+Постоянные SSH-туннели в WSL и в macOS: поднимаются сами при входе в систему,
+поднимаются заново после обрыва, управляются из окна.
 
 Вместо
 
@@ -21,6 +21,17 @@ ssh -o ServerAliveInterval=1 -p 2222 -f -N -L 5001:127.0.0.1:3306 deploy@db.exam
 └────────────────────────────────────┘      └────────────────────────────────────────┘
 ```
 
+В macOS всё проще — одна система и один пакет ([подробнее](#macos)):
+
+```
+┌─ macOS ─────────────────────────────────────────────────────────────────────┐
+│ HotPipe.app                окно          HTTP 127.0.0.1:46310               │
+│   └─ Contents/MacOS/hotpipe-server  ◄─── launchd (KeepAlive, при входе)     │
+│        ├─ ssh -N -L 5001:… ─────────────────────────────────────────────────┼─► сервер
+│        └─ ssh -N -L …         поднимает упавший ssh заново                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
 ## Из чего состоит
 
 | Часть | Где | Что делает |
@@ -28,6 +39,7 @@ ssh -o ServerAliveInterval=1 -p 2222 -f -N -L 5001:127.0.0.1:3306 deploy@db.exam
 | `hotpipe-server` | WSL, `~/.local/bin` | запускает ssh на каждый туннель, следит, поднимает заново; хранит туннели; HTTP API |
 | `hotpipe-gui.exe` | Windows, `D:\Dev\projects\hotpipe` | окно: включить и выключить сервер, туннели, их состояние, правка |
 | `hotpipe-gui.exe --keeper` | там же, без окна | **сторож**: держит `wsl.exe` с сервером и поднимает сервер, если тот упал |
+| `HotPipe.app` | macOS, `~/Applications` | окно и сервер в одном пакете; сторожа нет — сервер держит launchd |
 
 Сторож нужен потому, что WSL убивает всё запущенное через `wsl.exe`, когда тот
 выходит, и усыпляет машину, когда в ней не осталось сеансов. Кто-то в Windows
@@ -35,6 +47,8 @@ ssh -o ServerAliveInterval=1 -p 2222 -f -N -L 5001:127.0.0.1:3306 deploy@db.exam
 ([Р-002](docs/decisions.md)).
 
 ## Установка
+
+### Windows и WSL
 
 Из WSL — сервер:
 
@@ -58,7 +72,7 @@ build\deploy.ps1 -Start      # в D:\Dev\projects\hotpipe и запустить
 работает без человека и не может спросить пароль (`BatchMode=yes`). Если туннель
 пишет «сервер не принял ключ» — `ssh-copy-id -p <порт> <пользователь>@<сервер>`.
 
-## macOS
+### macOS
 
 Та же программа работает и в macOS — без WSL и без сторожа: сервер держит
 launchd ([Р-010](docs/decisions.md)). Окно и сервер собираются в один пакет
@@ -74,18 +88,21 @@ build/build-macos.sh -install    # собрать и положить в ~/Appli
 |---|---|
 | сервер | `HotPipe.app/Contents/MacOS/hotpipe-server`, задание launchd `dev.hotpipe.server` (`KeepAlive`) |
 | автозапуск | галочка «Запускать при входе в macOS» — `~/Library/LaunchAgents/dev.hotpipe.server.plist` |
-| туннели | `~/Library/Application Support/hotpipe/tunnels.json` |
-| окно, его настройки и журнал | `~/Library/Application Support/HotPipe/` |
+| туннели, журналы, настройки окна | `~/Library/Application Support/HotPipe/` |
 
 Выключенный переключателем сервер выгружается из launchd и запрещается
 (`launchctl disable`) — не поднимется и при следующем входе. Руками:
 `launchctl print gui/$(id -u)/dev.hotpipe.server`.
 
+Нужен ssh с параметром `Tag` (OpenSSH 9.4 и новее — он есть в нынешних macOS).
+Со старым ssh туннели работают, но ssh, оставшийся от упавшего сервера, новый
+сервер не узнает и назовёт занятый порт как чужой.
+
 ## Окно
 
 - **Переключатель «Сервер HotPipe»** — включает и выключает сервер вместе со
   сторожем. Выключение запоминается: выключенный сервер не поднимет ни сторож,
-  ни открытие окна, ни вход в Windows (до включения галочкой обратно).
+  ни открытие окна, ни вход в систему (до включения переключателем обратно).
 - **Туннели** — у каждого свой переключатель (запоминается сервером и переживает
   перезагрузку), состояние, число перезапусков, кнопки «перезапустить»,
   «изменить», «удалить» (в два щелчка). При сбое — объяснение словами и вывод
@@ -93,9 +110,9 @@ build/build-macos.sh -install    # собрать и положить в ~/Appli
 - **Добавить туннель** — можно просто вставить привычную команду `ssh … -L …`,
   поля заполнятся сами.
 - **Настройки** (шестерёнка) — как часто проверять связь (`ServerAliveInterval`,
-  `ServerAliveCountMax`), дистрибутив WSL, порт API, путь к серверу; кнопка
-  перезапуска сервера.
-- **Журналы** — сервера (из WSL) и окна со сторожем.
+  `ServerAliveCountMax`), дистрибутив WSL (только в Windows), порт API, путь к
+  серверу; кнопка перезапуска сервера.
+- **Журналы** — сервера и окна (в Windows — окна со сторожем).
 
 Состояния туннеля:
 
@@ -115,16 +132,19 @@ build/build-macos.sh -install    # собрать и положить в ~/Appli
   туннелем.
 - Повторы: 1, 2, 5, 10, 30, 60 секунд; простоявший минуту туннель после обрыва
   снова чинится за секунду. «Повторить сейчас» в окне не ждёт паузы.
-- «Работает» определяется по `/proc`: слушает ли **сам этот ssh** локальный порт.
+- «Работает» определяется у системы: слушает ли **сам этот ssh** локальный порт
+  (в Linux — по `/proc`, в macOS — через `lsof`).
   Пробных подключений через туннель нет — для MySQL они выглядели бы как
   оборванные входы, а после сотни таких MySQL блокирует адрес
   ([Р-004](docs/decisions.md)).
 - Порт занят чужим процессом (например, ssh, запущенным руками) — сервер его не
   трогает, а называет в ошибке и ждёт. Порт держит **свой** осиротевший ssh от
-  упавшего прежде сервера (помечен переменной `HOTPIPE_TUNNEL`, а родитель уже
-  не тот сервер) — убирается; ssh другого **работающего** сервера не трогается.
-- Упади сервер — его ssh уходят вместе с ним (`Pdeathsig`), упавший сервер
-  поднимет сторож.
+  упавшего прежде сервера (помечен — в Linux переменной `HOTPIPE_TUNNEL`, в
+  macOS аргументом `-o Tag=hotpipe:…`, — а родитель уже не тот сервер) —
+  убирается; ssh другого **работающего** сервера не трогается.
+- Упади сервер в Linux — его ssh уходят вместе с ним (`Pdeathsig`), упавший
+  сервер поднимет сторож. В macOS `Pdeathsig` нет: сервер поднимает launchd, и
+  новый сервер убирает оставшиеся ssh как сирот.
 
 ## Файлы
 
@@ -135,6 +155,19 @@ build/build-macos.sh -install    # собрать и положить в ~/Appli
 | окно, его настройки, журнал окна и сторожа | `D:\Dev\projects\hotpipe\` — `gui-config.json`, `hotpipe-gui.log` |
 | данные WebView2 | `D:\Dev\projects\hotpipe\webview\` |
 | сборочные кэши | `D:\Dev\projects\hotpipe\cache\` — сносится без последствий |
+
+В macOS (все пути — в `~/Library/Application Support/HotPipe/`):
+
+| Что | Где |
+|---|---|
+| туннели и настройки ssh | `tunnels.json` (+ `.bak` — прежняя версия) |
+| журнал сервера | `hotpipe-server.log` |
+| окно: настройки и журнал | `gui-config.json`, `hotpipe-gui.log` |
+| описание задания launchd | `dev.hotpipe.server.plist`; при автозапуске — копия в `~/Library/LaunchAgents/` |
+| вывод сервера мимо журнала (падения при запуске) | `hotpipe-server.stderr.log` |
+
+Сервер ищет каталог как `…/hotpipe` (`os.UserConfigDir`), окно — как
+`…/HotPipe`, но диск macOS регистр букв не различает, и это один и тот же каталог.
 
 `tunnels.json` можно править руками; после правки — `kill -HUP $(pgrep -x hotpipe-server)`
 или `curl -X POST -H 'X-Hotpipe: 1' http://127.0.0.1:46310/api/reload`.
@@ -182,10 +215,10 @@ curl -X POST   -H "$H"              http://127.0.0.1:46310/api/shutdown
 
 ## Без окна
 
-Сервер — обычная программа Linux и работает и сам:
+Сервер — обычная программа Linux и macOS и работает и сам:
 
 ```bash
-hotpipe-server                    # ~/.config/hotpipe/tunnels.json, API на 127.0.0.1:46310
+hotpipe-server                    # tunnels.json по умолчанию, API на 127.0.0.1:46310
 hotpipe-server -config x.json -listen 127.0.0.1:46400 -log /tmp/h.log
 hotpipe-server -version
 ```
@@ -203,6 +236,9 @@ hotpipe-server -version
 | «локальный порт 5001 занят: ssh (pid …)» | туннель, поднятый руками, — `kill <pid>`, HotPipe займёт порт сам |
 | «ключ сервера не совпал» | сервер переустанавливали? `ssh-keygen -R '[хост]:порт'` |
 | версии окна и сервера расходятся | одну из частей не пересобрали: `build/build.sh && build/install.sh` или `build\build-gui.ps1` |
+| macOS: «Сервер не отвечает», задание загружено | `~/Library/Application Support/HotPipe/hotpipe-server.stderr.log` и `launchctl print gui/$(id -u)/dev.hotpipe.server` |
+| macOS: «не найден hotpipe-server» | окно запущено не из собранного `HotPipe.app` — `build/build-macos.sh` или путь к серверу в настройках |
+| macOS: сервер работает из старой копии `HotPipe.app` | открыть окно из нужной копии — задание launchd перепишется на неё |
 
 ## Строение
 
@@ -210,15 +246,18 @@ hotpipe-server -version
 src/
   cmd/hotpipe-server   main: флаги, журнал, сигналы, порт API
   internal/config      tunnels.json: туннели, проверка полей, запись через переименование
-  internal/tunnel      надзор за ssh: аргументы, /proc, перевод ошибок ssh, повторы
+  internal/tunnel      надзор за ssh: аргументы, кто слушает порт (procnet_linux.go —
+                       /proc, procnet_darwin.go — lsof), перевод ошибок ssh, повторы
   internal/api         HTTP API
   internal/logfile     журнал в файле (из wsldrive)
   internal/version     сведения о сборке (из wsldrive)
   gui/                 окно на Tauri 1: Rust + Alpine, Tailwind, Flowbite
     src-tauri/src      main.rs — команды; server.rs — сторож и wsl.exe;
-                       autostart.rs — реестр; http.rs; config.rs; applog.rs
+                       autostart.rs — реестр; server_macos.rs и autostart_macos.rs —
+                       то же через launchd; http.rs; config.rs; applog.rs
     ui/                index.html, app.js (в т.ч. разбор вставленной команды ssh)
-build/                 build.sh, install.sh (WSL); build-gui.ps1, deploy.ps1 (Windows)
+build/                 build.sh, install.sh (WSL); build-gui.ps1, deploy.ps1 (Windows);
+                       build-macos.sh (macOS)
 dist/                  выпуски и журнал изменений
 docs/                  архитектура и журнал решений
 tools/gui/             shot.ps1 — снимок окна, uia.ps1 — нажатия в окне (проверки)
@@ -226,7 +265,7 @@ tools/gui/             shot.ps1 — снимок окна, uia.ps1 — нажа�
 
 Проверки: `cd src && go test -race ./...` (сервер, в т.ч. сквозные с поддельным
 ssh: обрыв, отказ в ключе, чужой и осиротевший порт) и `cargo test` в
-`src/gui/src-tauri` (их запускает `build-gui.ps1`).
+`src/gui/src-tauri` (их запускают `build-gui.ps1` и `build-macos.sh`).
 
 Живая проверка — настоящий ssh до своего сервера — включается файлом `.env` в
 корне проекта: скопируйте `.env.example` и впишите свой сервер. `.env` в
