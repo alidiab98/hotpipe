@@ -12,9 +12,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod applog;
+#[cfg_attr(target_os = "macos", path = "autostart_macos.rs")]
 mod autostart;
 mod config;
 mod http;
+// В macOS сервер держит launchd, а не сторож с wsl.exe (Р-010).
+#[cfg_attr(target_os = "macos", path = "server_macos.rs")]
 mod server;
 
 use config::Config;
@@ -28,7 +31,11 @@ const BUILT: &str = env!("HOTPIPE_BUILT");
 const DIRTY: &str = env!("HOTPIPE_DIRTY");
 
 fn build_line() -> String {
-    let mut s = format!("hotpipe-gui {VERSION} (снимок {COMMIT}, собрано {BUILT}, windows/amd64)");
+    let mut s = format!(
+        "hotpipe-gui {VERSION} (снимок {COMMIT}, собрано {BUILT}, {}/{})",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
     if DIRTY == "yes" {
         s.push_str(" [изменённое дерево]");
     }
@@ -76,6 +83,8 @@ struct Status {
     notice: Option<String>,
     version: String,
     build: String,
+    /// «windows» или «macos» — окно показывает то, что есть на этой системе.
+    platform: &'static str,
 }
 
 // Все команды — (async): без этого Tauri 1.x исполняет их в главном потоке, и
@@ -102,6 +111,7 @@ fn get_status(app: tauri::State<App>) -> Status {
         notice: app.notice.lock().unwrap().clone(),
         version: VERSION.to_string(),
         build: build_line(),
+        platform: std::env::consts::OS,
     }
 }
 
@@ -145,13 +155,20 @@ fn wait_until(limit: Duration, mut ready: impl FnMut() -> bool) -> bool {
     }
 }
 
+/// Ставить ли сторожа. В macOS — всегда: spawn_keeper там ничего не трогает,
+/// если задание уже загружено и не устарело, а устаревшее (HotPipe.app
+/// переложили) загружает заново (Р-010).
+fn must_spawn_keeper() -> bool {
+    cfg!(target_os = "macos") || !server::keeper_alive()
+}
+
 /// Включить сервер: запомнить желание и поставить сторожа, если его нет.
 #[tauri::command(async)]
 fn server_on(app: tauri::State<App>) -> Result<(), String> {
     let _g = BusyGuard::new(&app.busy).ok_or("уже выполняется")?;
     let cfg = set_enabled(&app, true)?;
     applog::line("окно", "сервер включён");
-    if !server::keeper_alive() {
+    if must_spawn_keeper() {
         server::spawn_keeper()?;
     }
     // WSL после перезагрузки поднимается секунд десять, и это не сбой.
@@ -168,6 +185,9 @@ fn server_off(app: tauri::State<App>) -> Result<(), String> {
     let _g = BusyGuard::new(&app.busy).ok_or("уже выполняется")?;
     let cfg = set_enabled(&app, false)?;
     applog::line("окно", "сервер выключен");
+    // launchd с KeepAlive поднял бы завершившийся сервер — задание выгружаем.
+    #[cfg(target_os = "macos")]
+    server::stop_keeper()?;
     let _ = http::request(cfg.api_port, "POST", "/api/shutdown", None);
     if wait_until(Duration::from_secs(15), || !server::alive(&cfg)) {
         return Ok(());
@@ -182,9 +202,13 @@ fn server_restart(app: tauri::State<App>) -> Result<(), String> {
     let _g = BusyGuard::new(&app.busy).ok_or("уже выполняется")?;
     let cfg = set_enabled(&app, true)?;
     applog::line("окно", "перезапуск сервера");
+    // В macOS задание выгружается и загружается заново: так launchd прочтёт
+    // описание с новыми путём и портом из настроек.
+    #[cfg(target_os = "macos")]
+    server::stop_keeper()?;
     let _ = http::request(cfg.api_port, "POST", "/api/shutdown", None);
     wait_until(Duration::from_secs(10), || !server::alive(&cfg));
-    if !server::keeper_alive() {
+    if must_spawn_keeper() {
         server::spawn_keeper()?;
     }
     if wait_until(Duration::from_secs(40), || server::alive(&cfg)) {
@@ -237,7 +261,7 @@ fn main() {
 
     // Открыв окно, человек ожидает работающий сервер: если он должен работать,
     // а сторожа нет — ставим. Выключенный кнопкой сервер не трогаем.
-    if cfg.server_enabled && !server::keeper_alive() {
+    if cfg.server_enabled && must_spawn_keeper() {
         if let Err(e) = server::spawn_keeper() {
             applog::line("окно", &e);
         }
